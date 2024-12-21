@@ -12,6 +12,11 @@ import pathlib
 from enum import Enum
 import glob
 
+
+all_mp4_files = list(pathlib.Path('.\\panda70m_hq6m_formatted_humansOnly_v2.1').rglob('*.mp4'))
+MODEL_ID = "gemini-2.0-flash-exp"  # @param ["gemini-1.5-flash-8b","gemini-1.5-flash-002","gemini-1.5-pro-002","gemini-2.0-flash-exp"] {"allow-input":true}
+
+
 class ProcessingStatus(Enum):
     PENDING = "pending"
     COMPLETED = "completed"
