@@ -73,9 +73,6 @@ class VideoProcessingLogger:
                 error_message or ''
             ])
 
-all_mp4_files = list(pathlib.Path('.\\panda70m_hq6m_formatted_humansOnly_v2.1').rglob('*.mp4'))
-MODEL_ID = "gemini-2.0-flash-exp"  # @param ["gemini-1.5-flash-8b","gemini-1.5-flash-002","gemini-1.5-pro-002","gemini-2.0-flash-exp"] {"allow-input":true}
-
 def connect_to_google_api():
     load_dotenv()
     GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
