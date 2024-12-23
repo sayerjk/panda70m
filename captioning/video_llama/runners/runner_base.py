@@ -32,8 +32,8 @@ from video_llama.datasets.datasets.dataloader_utils import (
     MultiIterLoader,
     PrefetchLoader,
 )
-from dataset.datasets.shuffled_webdataset_dataset import ShuffledWebdatasetDataset
-from dataset.batching.batching import flexible_batch_elements_collate_fn
+from data.datasets.shuffled_webdataset_dataset import ShuffledWebdatasetDataset
+from data.batching.batching import flexible_batch_elements_collate_fn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler, IterableDataset
 from collections import defaultdict

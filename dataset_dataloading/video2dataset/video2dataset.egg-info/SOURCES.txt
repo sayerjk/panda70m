@@ -1,6 +1,12 @@
-LICENSE
 README.md
 setup.py
+tests/test_data_reader.py
+tests/test_data_writers.py
+tests/test_dataloaders.py
+tests/test_downloaders.py
+tests/test_main.py
+tests/test_subsamplers.py
+tests/test_yt_meta.py
 video2dataset/__init__.py
 video2dataset/data_reader.py
 video2dataset/data_writer.py
@@ -21,6 +27,7 @@ video2dataset/configs/caption.yaml
 video2dataset/configs/default.yaml
 video2dataset/configs/downsample_ml.yaml
 video2dataset/configs/optical_flow.yaml
+video2dataset/configs/panda70m.yaml
 video2dataset/dataloader/__init__.py
 video2dataset/dataloader/audio_decode.py
 video2dataset/dataloader/custom_wds.py

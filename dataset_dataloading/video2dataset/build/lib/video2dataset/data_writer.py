@@ -292,6 +292,13 @@ class FilesSampleWriter:
         self.encode_formats = encode_formats
 
     def write(self, streams, key, caption, meta):
+
+        print(f"\nProcessing video {key}")
+        print(f"Metadata received: {meta}")
+        
+        if not self._should_save_video(meta):
+            return
+
         """Write sample to disk"""
         for modality, stream in streams.items():
             ext = self.encode_formats[modality] if modality in self.encode_formats else modality
@@ -315,6 +322,24 @@ class FilesSampleWriter:
             f.write(j)
 
         self.buffered_parquet_writer.write(meta)
+
+    def _should_save_video(self, meta):
+        """Check if video should be saved based on metadata"""
+        # Example conditions - customize these:
+        try:
+
+            # Check if desirable_filtering exists and is acceptable
+            quality_options = ['desirable', '1_still_foreground_image']
+            print(f"desirable_filtering value: {meta.get('desirable_filtering')}")  # Debug print
+            if meta['desirable_filtering'] in quality_options:
+                print(f"Skipping video due to quality: {meta['desirable_filtering']}")  # Debug print
+                return True
+
+            # Add more conditions as needed
+            return True
+        except Exception as e:
+            print(f"Error checking metadata conditions: {e}")
+            return False   
 
     def close(self):
         self.buffered_parquet_writer.close()

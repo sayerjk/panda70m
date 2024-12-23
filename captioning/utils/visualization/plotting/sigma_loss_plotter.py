@@ -14,7 +14,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from dataset.data_modules.data_module import DataModule
+from data.data_modules.data_module import DataModule
 from training.losses.diffusion.multisigma_edm_loss import MultisigmaEDMLoss
 from training.trainers.diffusion_model_trainer import DiffusionModelTrainer
 from utils.distributed.distributed_statistics_accumulator import DistributedStatisticsAccumulator

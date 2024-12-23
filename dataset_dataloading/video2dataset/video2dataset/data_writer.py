@@ -2,12 +2,16 @@
 
 import json
 import os
+from pprint import pprint
 
 import fsspec
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import webdataset as wds
+import logging
+import csv
+from datetime import datetime
 
 
 class BufferedParquetWriter:
@@ -290,9 +294,51 @@ class FilesSampleWriter:
         self.save_caption = save_caption
         self.buffered_parquet_writer = BufferedParquetWriter(output_folder + "/" + shard_name + ".parquet", schema, 100)
         self.encode_formats = encode_formats
+        
+        # Create a CSV log file for this shard
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.csv_log_path = f"{output_folder}/processed_videos_{timestamp}.csv"
+        
+        logging.info(f"Creating CSV log file at: {self.csv_log_path}")
+        
+        # Create CSV file with headers
+        self.csv_headers = [
+            'processing_time',
+            'shard_id',
+            'video_id',
+            'url',
+            'timestamp',
+            'caption',
+            'matching_score',
+            'desirable_filtering',
+            'status',
+            'clip_index'
+        ]
+        
+        # Create or append to CSV file
+        try:
+            with open(self.csv_log_path, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=self.csv_headers)
+                if f.tell() == 0:  # Only write headers if file is empty
+                    writer.writeheader()
+                    logging.info("CSV headers written successfully")
+        except Exception as e:
+            logging.error(f"Error creating CSV file: {e}")
 
     def write(self, streams, key, caption, meta):
         """Write sample to disk"""
+        # First check if we should save
+        should_save = self._should_save_video(meta, key)
+        
+        # Log the processing regardless of save decision
+        self._log_to_csv(key, caption, meta, should_save)
+        
+        if not should_save:
+            return
+            
+        print(f"\nProcessing video {key}")
+        # print(f"Metadata received: {meta}")
+        
         for modality, stream in streams.items():
             ext = self.encode_formats[modality] if modality in self.encode_formats else modality
             filename = f"{self.subfolder}/{key}.{ext}"
@@ -315,6 +361,55 @@ class FilesSampleWriter:
             f.write(j)
 
         self.buffered_parquet_writer.write(meta)
+
+    def _log_to_csv(self, key, caption, meta, was_saved):
+        """Log processing details to CSV"""
+        try:
+            with open(self.csv_log_path, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=self.csv_headers)
+                
+                # Prepare the log entry
+                log_entry = {
+                    'processing_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    'shard_id': self.shard_id,
+                    'video_id': meta.get('videoID', ''),
+                    'url': meta.get('url', ''),
+                    'timestamp': meta.get('timestamp', ''),
+                    'caption': caption if isinstance(caption, str) else str(caption),
+                    'matching_score': meta.get('matching_score', ''),
+                    'desirable_filtering': meta.get('desirable_filtering', ''),
+                    'status': 'SAVED' if was_saved else 'SKIPPED',
+                    'clip_index': key
+                }
+                
+                writer.writerow(log_entry)
+                logging.debug(f"Wrote entry to CSV for video {key}")
+                
+        except Exception as e:
+            logging.error(f"Error writing to CSV log for video [{key}]: {e}")
+            logging.error(f"Attempted to write to: {self.csv_log_path}")
+
+    def _should_save_video(self, meta, key):
+        """Check if video should be saved based on metadata"""
+        try:
+            filtering_value = meta.get('desirable_filtering')
+            video_id = meta.get('videoID', 'unknown')
+            
+            if not isinstance(filtering_value, list):
+                filtering_value = [filtering_value]
+                
+            # should_save = any(val == 'desirable' for val in filtering_value)
+            should_save = True
+            
+            status = 'SAVING' if should_save else 'SKIPPING'
+            logging.info(f"Video [index: {key}, id: {video_id}]: {status}")
+            logging.debug(f"Filtering values for [{key}]: {filtering_value}")
+            
+            return should_save
+            
+        except Exception as e:
+            logging.error(f"Error checking metadata for video [{key}]: {e}")
+            return False
 
     def close(self):
         self.buffered_parquet_writer.close()

@@ -170,10 +170,23 @@ class YtDlpDownloader:
         self.download_audio = yt_args.get("download_audio", False)
         self.tmp_dir = tmp_dir
         self.encode_formats = encode_formats
-
-        # TODO: figure out when to do this
-        # was relevant with HD videos for loading with decord
         self.specify_codec = False
+        
+        # Add default options for yt-dlp
+        self.default_ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,
+            'ignoreerrors': True,
+            # Add options to handle network issues
+            'socket_timeout': 30,
+            'retries': 3,
+            'fragment_retries': 3,
+            'skip_unavailable_fragments': True,
+            # Add options to handle geo-restrictions
+            'geo_bypass': True,
+            'geo_bypass_country': 'US'
+        }
 
     def __call__(self, url):
         modality_paths = {}
@@ -191,9 +204,9 @@ class YtDlpDownloader:
         if self.encode_formats.get("audio", None):
             audio_path_m4a = f"{self.tmp_dir}/{str(uuid.uuid4())}.m4a"
             ydl_opts = {
+                **self.default_ydl_opts,
                 "outtmpl": audio_path_m4a,
                 "format": audio_fmt_string,
-                "quiet": True,
             }
 
             err = None
@@ -201,23 +214,22 @@ class YtDlpDownloader:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.download(url)
             except Exception as e:  # pylint: disable=(broad-except)
-                err = str(e)
-                os.remove(audio_path_m4a)
+                err = self._format_error(e, url)
+                try:
+                    os.remove(audio_path_m4a)
+                except OSError:
+                    pass
 
             if err is None:
-                # TODO: look into this, don't think we can just do this
-                # TODO: just figure out a way to download the preferred extension using yt-dlp
-                # audio_path = audio_path_m4a.replace(".m4a", f".{self.encode_formats['audio']}")
                 audio_path = audio_path_m4a
                 modality_paths["audio"] = audio_path
 
         if self.encode_formats.get("video", None):
             video_path = f"{self.tmp_dir}/{str(uuid.uuid4())}.mp4"
             ydl_opts = {
+                **self.default_ydl_opts,
                 "outtmpl": video_path,
                 "format": video_format_string,
-                "quiet": True,
-                "no_warnings": True,
             }
 
             err = None
@@ -225,8 +237,11 @@ class YtDlpDownloader:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.download(url)
             except Exception as e:  # pylint: disable=(broad-except)
-                err = str(e)
-                os.remove(video_path)
+                err = self._format_error(e, url)
+                try:
+                    os.remove(video_path)
+                except OSError:
+                    pass
 
             if err is None:
                 modality_paths["video"] = video_path
@@ -238,10 +253,27 @@ class YtDlpDownloader:
             else:
                 yt_meta_dict = {}
         except Exception as e:  # pylint: disable=(broad-except)
-            err = str(e)
+            err = self._format_error(e, url)
             yt_meta_dict = {}
 
-        return modality_paths, yt_meta_dict, None
+        return modality_paths, yt_meta_dict, err
+
+    def _format_error(self, error, url):
+        """Format error message to be more helpful"""
+        error_str = str(error)
+        
+        if "Failed to extract any player response" in error_str:
+            return (f"YouTube access error for {url}. This may be due to:\n"
+                   "1. VPN blocking (try disabling VPN)\n"
+                   "2. Video is private/deleted\n"
+                   "3. YouTube API changes\n"
+                   f"Original error: {error_str}")
+        elif "HTTP Error 429" in error_str:
+            return f"Rate limit exceeded for {url}. Try reducing processes_count in config or waiting."
+        elif "This video is not available" in error_str:
+            return f"Video not available: {url}. May be private, deleted, or geo-restricted."
+        
+        return error_str
 
 
 class VideoDataReader:

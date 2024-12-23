@@ -2,8 +2,8 @@ subsampling: {}
 
 reading:
     yt_args:
-        download_size: 360
-        download_audio: True
+        download_size: 1080
+        download_audio: False
         yt_metadata_args:
             writesubtitles:  True
             subtitleslangs: ['en']
@@ -18,7 +18,7 @@ storage:
     captions_are_subtitles: False
 
 distribution:
-    processes_count: 32
-    thread_count: 32
+    processes_count: 3
+    thread_count: 3
     subjob_size: 10000
     distributor: "multiprocessing"

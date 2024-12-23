@@ -4,6 +4,9 @@ import sys
 import signal
 import fire
 import fsspec
+import datetime
+from contextlib import contextmanager
+import logging
 
 from omegaconf import OmegaConf
 from typing import List, Optional, Any
@@ -37,6 +40,69 @@ def identity(x):
 # pylint: disable=unused-argument
 # pylint: disable=eval-used
 # pylint: disable=broad-except
+@contextmanager
+def console_and_file_logger(output_folder):
+    """Context manager to log both to console and file"""
+    # Create a log filename with timestamp
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(output_folder, exist_ok=True)
+    
+    log_file = f"{output_folder}/video2dataset_{timestamp}.log"
+    
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    
+    # Create formatters
+    formatter = logging.Formatter('%(message)s')
+    file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    
+    # Console handler with immediate flush
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    console_handler.setLevel(logging.INFO)
+    
+    # File handler with immediate flush
+    file_handler = logging.FileHandler(log_file, mode='a')
+    file_handler.setFormatter(file_formatter)
+    file_handler.setLevel(logging.INFO)
+    
+    # Add handlers
+    root_logger.addHandler(console_handler)
+    root_logger.addHandler(file_handler)
+    
+    # Force immediate flush after each log
+    def force_flush(record):
+        console_handler.flush()
+        file_handler.flush()
+        return True
+    
+    console_handler.addFilter(force_flush)
+    file_handler.addFilter(force_flush)
+    
+    try:
+        logging.info(f"Starting video2dataset process. Log file: {log_file}")
+        logging.info(f"Start time: {datetime.datetime.now()}")
+        
+        yield
+        
+        logging.info(f"Finished video2dataset process")
+        logging.info(f"End time: {datetime.datetime.now()}")
+        
+    finally:
+        # Ensure final flush
+        logging.info("Cleaning up logging...")
+        console_handler.flush()
+        file_handler.flush()
+        
+        # Remove and close handlers
+        root_logger.removeHandler(console_handler)
+        root_logger.removeHandler(file_handler)
+        console_handler.close()
+        file_handler.close()
+
 def video2dataset(
     url_list: str,
     output_folder: str = "dataset",
@@ -97,189 +163,190 @@ def video2dataset(
     tmp_dir: Path to temporary directory on your file system
     config: Path to your config of choice or the config itself (more info on configs in API doc)
     """
-    local_args = dict(locals())
-    if isinstance(config, str):
-        config = CONFIGS[config] if config in CONFIGS else OmegaConf.load(config)
-        config = OmegaConf.to_container(config)
-    for arg_type in ["subsampling", "reading", "storage", "distribution"]:
-        assert arg_type in config
+    with console_and_file_logger(output_folder):
+        local_args = dict(locals())
+        if isinstance(config, str):
+            config = CONFIGS[config] if config in CONFIGS else OmegaConf.load(config)
+            config = OmegaConf.to_container(config)
+        for arg_type in ["subsampling", "reading", "storage", "distribution"]:
+            assert arg_type in config
 
-    if config["reading"]["sampler"] is None:
-        config["reading"]["sampler"] = identity
+        if config["reading"]["sampler"] is None:
+            config["reading"]["sampler"] = identity
 
-    called_from_slurm = "CALLED_FROM_SLURM" in os.environ
-    if called_from_slurm:
-        global_task_id = int(os.environ["GLOBAL_RANK"])
-        num_tasks = (
-            config["distribution"]["distributor_args"]["n_nodes"]
-            * config["distribution"]["distributor_args"]["tasks_per_node"]
-        )
-        config["reading"]["sampler"] = SlurmShardSampler(global_task_id=global_task_id, num_tasks=num_tasks)
-        config["distribution"]["distributor"] = "multiprocessing"
+        called_from_slurm = "CALLED_FROM_SLURM" in os.environ
+        if called_from_slurm:
+            global_task_id = int(os.environ["GLOBAL_RANK"])
+            num_tasks = (
+                config["distribution"]["distributor_args"]["n_nodes"]
+                * config["distribution"]["distributor_args"]["tasks_per_node"]
+            )
+            config["reading"]["sampler"] = SlurmShardSampler(global_task_id=global_task_id, num_tasks=num_tasks)
+            config["distribution"]["distributor"] = "multiprocessing"
 
-        # Only log from master
-        enable_wandb = enable_wandb and (global_task_id == 0)
+            # Only log from master
+            enable_wandb = enable_wandb and (global_task_id == 0)
 
-    # TODO: find better location for this code
-    # TODO: figure out minimum yt_meta_args for subtitles to be added to metadata
-    if config["storage"]["captions_are_subtitles"]:
-        assert clip_col is None  # no weird double-clipping
-        if config["reading"]["yt_args"]["yt_metadata_args"] is None:
-            config["reading"]["yt_args"]["yt_metadata_args"] = {}
-        config["reading"]["yt_args"]["yt_metadata_args"]["writesubtitles"] = True  # type: ignore
+        # TODO: find better location for this code
+        # TODO: figure out minimum yt_meta_args for subtitles to be added to metadata
+        if config["storage"]["captions_are_subtitles"]:
+            assert clip_col is None  # no weird double-clipping
+            if config["reading"]["yt_args"]["yt_metadata_args"] is None:
+                config["reading"]["yt_args"]["yt_metadata_args"] = {}
+            config["reading"]["yt_args"]["yt_metadata_args"]["writesubtitles"] = True  # type: ignore
 
-    if encode_formats is None:
-        encode_formats = {"video": "mp4"}
+        if encode_formats is None:
+            encode_formats = {"video": "mp4"}
 
-    def make_path_absolute(path):
-        fs, p = fsspec.core.url_to_fs(path)
-        if fs.protocol == "file":
-            return os.path.abspath(p)
-        return path
+        def make_path_absolute(path):
+            fs, p = fsspec.core.url_to_fs(path)
+            if fs.protocol == "file":
+                return os.path.abspath(p)
+            return path
 
-    output_folder = make_path_absolute(output_folder)
-    url_list = make_path_absolute(url_list)
+        output_folder = make_path_absolute(output_folder)
+        url_list = make_path_absolute(url_list)
 
-    logger_process = LoggerProcess(output_folder, enable_wandb, wandb_project, local_args)
-    tmp_path = output_folder + "/_tmp"
-    fs, run_tmp_dir = fsspec.core.url_to_fs(tmp_path)
-    if not fs.exists(run_tmp_dir):
-        fs.mkdir(run_tmp_dir)
+        logger_process = LoggerProcess(output_folder, enable_wandb, wandb_project, local_args)
+        tmp_path = output_folder + "/_tmp"
+        fs, run_tmp_dir = fsspec.core.url_to_fs(tmp_path)
+        if not fs.exists(run_tmp_dir):
+            fs.mkdir(run_tmp_dir)
 
-    def signal_handler(signal_arg, frame):  # pylint: disable=unused-argument
-        try:
-            fs.rm(run_tmp_dir, recursive=True)
-        except Exception as _:  # pylint: disable=broad-except
-            pass
-        logger_process.terminate()
-        sys.exit(0)
+        def signal_handler(signal_arg, frame):  # pylint: disable=unused-argument
+            try:
+                fs.rm(run_tmp_dir, recursive=True)
+            except Exception as _:  # pylint: disable=broad-except
+                pass
+            logger_process.terminate()
+            sys.exit(0)
 
-    signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
 
-    save_caption = caption_col is not None or config["storage"]["captions_are_subtitles"]
+        save_caption = caption_col is not None or config["storage"]["captions_are_subtitles"]
 
-    fs, output_path = fsspec.core.url_to_fs(output_folder)
+        fs, output_path = fsspec.core.url_to_fs(output_folder)
 
-    if not fs.exists(output_path):
-        fs.mkdir(output_path)
-        done_shards = set()
-    else:
-        if incremental_mode == "incremental":
-            done_shards = set(int(x.split("/")[-1].split("_")[0]) for x in fs.glob(output_path + "/*.json"))
-        elif incremental_mode == "overwrite":
-            fs.rm(output_path, recursive=True)
+        if not fs.exists(output_path):
             fs.mkdir(output_path)
             done_shards = set()
         else:
-            raise ValueError(f"Unknown incremental mode {incremental_mode}")
+            if incremental_mode == "incremental":
+                done_shards = set(int(x.split("/")[-1].split("_")[0]) for x in fs.glob(output_path + "/*.json"))
+            elif incremental_mode == "overwrite":
+                fs.rm(output_path, recursive=True)
+                fs.mkdir(output_path)
+                done_shards = set()
+            else:
+                raise ValueError(f"Unknown incremental mode {incremental_mode}")
 
-    logger_process.done_shards = done_shards
-    logger_process.start()
+        logger_process.done_shards = done_shards
+        logger_process.start()
 
-    if output_format == "webdataset":
-        sample_writer_class = WebDatasetSampleWriter
-    elif output_format == "parquet":
-        sample_writer_class = ParquetSampleWriter  # type: ignore
-    elif output_format == "files":
-        sample_writer_class = FilesSampleWriter  # type: ignore
-    elif output_format == "tfrecord":
-        sample_writer_class = TFRecordSampleWriter  # type: ignore
-    elif output_format == "dummy":
-        sample_writer_class = DummySampleWriter  # type: ignore
-    else:
-        raise ValueError(f"Invalid output format {output_format}")
+        if output_format == "webdataset":
+            sample_writer_class = WebDatasetSampleWriter
+        elif output_format == "parquet":
+            sample_writer_class = ParquetSampleWriter  # type: ignore
+        elif output_format == "files":
+            sample_writer_class = FilesSampleWriter  # type: ignore
+        elif output_format == "tfrecord":
+            sample_writer_class = TFRecordSampleWriter  # type: ignore
+        elif output_format == "dummy":
+            sample_writer_class = DummySampleWriter  # type: ignore
+        else:
+            raise ValueError(f"Invalid output format {output_format}")
 
-    if input_format == "webdataset":
-        shard_iterator = OutputSharder(  # type: ignore
-            url_list, input_format, done_shards, sampler=config["reading"]["sampler"]
-        )
-    else:
-        shard_iterator = InputSharder(  # type: ignore
-            url_list,
-            input_format,
-            url_col,
-            caption_col,
-            clip_col,
-            save_additional_columns,
-            config["storage"]["number_sample_per_shard"],
-            done_shards,
-            tmp_path,
-            config["reading"]["sampler"],
-        )
+        if input_format == "webdataset":
+            shard_iterator = OutputSharder(  # type: ignore
+                url_list, input_format, done_shards, sampler=config["reading"]["sampler"]
+            )
+        else:
+            shard_iterator = InputSharder(  # type: ignore
+                url_list,
+                input_format,
+                url_col,
+                caption_col,
+                clip_col,
+                save_additional_columns,
+                config["storage"]["number_sample_per_shard"],
+                done_shards,
+                tmp_path,
+                config["reading"]["sampler"],
+            )
 
-    if stage == "download":
-        worker = DownloadWorker(
-            sample_writer_class=sample_writer_class,
-            save_caption=save_caption,
-            output_folder=output_folder,
-            column_list=shard_iterator.column_list,
-            tmp_dir=tmp_dir,
-            encode_formats=encode_formats,
-            config=config,
-        )
-    elif stage == "subset":
-        worker = SubsetWorker(  # type: ignore
-            sample_writer_class=sample_writer_class,
-            output_folder=output_folder,
-            encode_formats=encode_formats,
-            config=config,
-        )
-    elif stage == "optical_flow":
-        is_slurm_task = "GLOBAL_RANK" in os.environ and config["distribution"]["distributor"] == "multiprocessing"
-        worker = OpticalFlowWorker(  # type: ignore
-            sample_writer_class=sample_writer_class,
-            output_folder=output_folder,
-            encode_formats=encode_formats,
-            is_slurm_task=is_slurm_task,
-            config=config,
-        )
-    elif stage == "caption":
-        is_slurm_task = "GLOBAL_RANK" in os.environ and config["distribution"]["distributor"] == "multiprocessing"
-        worker = CaptionWorker(  # type: ignore
-            sample_writer_class=sample_writer_class,
-            output_folder=output_folder,
-            encode_formats=encode_formats,
-            is_slurm_task=is_slurm_task,
-            config=config,
-        )
-    elif stage == "whisper":
-        is_slurm_task = "GLOBAL_RANK" in os.environ and config["distribution"]["distributor"] == "multiprocessing"
-        worker = WhisperWorker(  # type: ignore
-            sample_writer_class=sample_writer_class,
-            output_folder=output_folder,
-            column_list=shard_iterator.column_list,
-            tmp_dir=tmp_dir,
-            encode_formats=encode_formats,
-            is_slurm_task=is_slurm_task,
-            config=config,
-        )
-    else:
-        raise ValueError(f"Invalid stage: {stage}")
+        if stage == "download":
+            worker = DownloadWorker(
+                sample_writer_class=sample_writer_class,
+                save_caption=save_caption,
+                output_folder=output_folder,
+                column_list=shard_iterator.column_list,
+                tmp_dir=tmp_dir,
+                encode_formats=encode_formats,
+                config=config,
+            )
+        elif stage == "subset":
+            worker = SubsetWorker(  # type: ignore
+                sample_writer_class=sample_writer_class,
+                output_folder=output_folder,
+                encode_formats=encode_formats,
+                config=config,
+            )
+        elif stage == "optical_flow":
+            is_slurm_task = "GLOBAL_RANK" in os.environ and config["distribution"]["distributor"] == "multiprocessing"
+            worker = OpticalFlowWorker(  # type: ignore
+                sample_writer_class=sample_writer_class,
+                output_folder=output_folder,
+                encode_formats=encode_formats,
+                is_slurm_task=is_slurm_task,
+                config=config,
+            )
+        elif stage == "caption":
+            is_slurm_task = "GLOBAL_RANK" in os.environ and config["distribution"]["distributor"] == "multiprocessing"
+            worker = CaptionWorker(  # type: ignore
+                sample_writer_class=sample_writer_class,
+                output_folder=output_folder,
+                encode_formats=encode_formats,
+                is_slurm_task=is_slurm_task,
+                config=config,
+            )
+        elif stage == "whisper":
+            is_slurm_task = "GLOBAL_RANK" in os.environ and config["distribution"]["distributor"] == "multiprocessing"
+            worker = WhisperWorker(  # type: ignore
+                sample_writer_class=sample_writer_class,
+                output_folder=output_folder,
+                column_list=shard_iterator.column_list,
+                tmp_dir=tmp_dir,
+                encode_formats=encode_formats,
+                is_slurm_task=is_slurm_task,
+                config=config,
+            )
+        else:
+            raise ValueError(f"Invalid stage: {stage}")
 
-    print("Starting the downloading of this file")
-    if config["distribution"]["distributor"] == "multiprocessing" or called_from_slurm:
-        distributor_fn = multiprocessing_distributor if stage not in ["whisper", "caption"] else no_distributor
-        called_from_slurm = "GLOBAL_RANK" in os.environ
-    elif config["distribution"]["distributor"] == "pyspark":
-        distributor_fn = pyspark_distributor
-    elif config["distribution"]["distributor"] == "slurm":
-        worker_args = {key: local_args[key] for key in local_args if not key.startswith("slurm")}
-        slurm_args = config["distribution"]["distributor_args"]
+        print("Starting the downloading of this file")
+        if config["distribution"]["distributor"] == "multiprocessing" or called_from_slurm:
+            distributor_fn = multiprocessing_distributor if stage not in ["whisper", "caption"] else no_distributor
+            called_from_slurm = "GLOBAL_RANK" in os.environ
+        elif config["distribution"]["distributor"] == "pyspark":
+            distributor_fn = pyspark_distributor
+        elif config["distribution"]["distributor"] == "slurm":
+            worker_args = {key: local_args[key] for key in local_args if not key.startswith("slurm")}
+            slurm_args = config["distribution"]["distributor_args"]
 
-        distributor_fn = SlurmDistributor(worker_args=worker_args, **slurm_args)
-    else:
-        raise ValueError(f"Distributor {config['distribution']['distributor']} not supported")
+            distributor_fn = SlurmDistributor(worker_args=worker_args, **slurm_args)
+        else:
+            raise ValueError(f"Distributor {config['distribution']['distributor']} not supported")
 
-    distributor_fn(
-        config["distribution"]["processes_count"],
-        worker,
-        shard_iterator,
-        config["distribution"]["subjob_size"],
-        max_shard_retry,
-    )
-    logger_process.join()
-    if not called_from_slurm:
-        fs.rm(run_tmp_dir, recursive=True)
+        distributor_fn(
+            config["distribution"]["processes_count"],
+            worker,
+            shard_iterator,
+            config["distribution"]["subjob_size"],
+            max_shard_retry,
+        )
+        logger_process.join()
+        if not called_from_slurm:
+            fs.rm(run_tmp_dir, recursive=True)
 
 
 def main():

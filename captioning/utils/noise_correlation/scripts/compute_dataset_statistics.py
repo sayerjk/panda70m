@@ -31,7 +31,7 @@ from utils.configuration.evaluation_configuration import EvaluationConfiguration
 from utils.distributed.distributed_utils import cleanup_distributed, initialize_distributed, make_directory_rank_0, print_r0
 from utils.noise_correlation.video_region import VideoRegion
 import utils.profiling
-from dataset.data_modules.data_module import DataModule
+from data.data_modules.data_module import DataModule
 from utils.checkpoint_manager import CheckpointManager
 from utils.configuration.configuration import Configuration
 from utils.logging.logger import Logger

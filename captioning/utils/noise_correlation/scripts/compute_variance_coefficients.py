@@ -35,7 +35,7 @@ from utils.noise_correlation.correlated_noise_region import CorrelatedNoiseRegio
 from utils.noise_correlation.covariance_pair_sampler import CovariancePairSampler
 from utils.noise_correlation.video_region import VideoRegion
 import utils.profiling
-from dataset.data_modules.data_module import DataModule
+from data.data_modules.data_module import DataModule
 from utils.checkpoint_manager import CheckpointManager
 from utils.configuration.configuration import Configuration
 from utils.logging.logger import Logger
