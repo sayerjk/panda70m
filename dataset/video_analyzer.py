@@ -1,3 +1,27 @@
+"""
+This script processes video files to analyze human presence using Google's API.
+
+It performs the following tasks:
+1. Logs the processing status of each video.
+2. Connects to the Google API for video analysis.
+3. Uploads videos to the Google API and waits for processing.
+4. Analyzes the presence of humans in the video and generates a JSON output.
+5. Logs the results of the analysis.
+
+Classes:
+    ProcessingStatus(Enum): Enum for processing statuses.
+    VideoProcessingLogger: Handles logging of video processing statuses.
+
+Functions:
+    connect_to_google_api(): Connects to the Google API using credentials from the environment.
+    select_video(video_basename: str): Selects a video file based on its basename.
+    await_upload(file_upload): Waits for the video upload to complete.
+    analyze_human_presence(video_id: str, logger: VideoProcessingLogger): Analyzes human presence in a video.
+
+Usage:
+    Run the script to process all pending videos in the specified directory.
+"""
+
 import datetime
 import json
 import os
@@ -12,9 +36,14 @@ import pathlib
 from enum import Enum
 import glob
 
+from prompts import *
+
 
 all_mp4_files = list(pathlib.Path('.\\panda70m_hq6m_formatted_humansOnly_v2.1').rglob('*.mp4'))
-MODEL_ID = "gemini-2.0-flash-exp"  # @param ["gemini-1.5-flash-8b","gemini-1.5-flash-002","gemini-1.5-pro-002","gemini-2.0-flash-exp"] {"allow-input":true}
+# MODEL_ID = "gemini-2.0-flash-exp"  # @param ["gemini-1.5-flash-8b","gemini-1.5-flash-002","gemini-1.5-pro-002","gemini-2.0-flash-exp"] {"allow-input":true}
+# MODEL_ID = 'gemini-1.5-pro-002' # free tier: 2 requests per minute
+MODEL_ID = 'gemini-1.5-flash-002'
+USER_PROMPT = GRAPHICS_USER_PROMPT
 
 
 class ProcessingStatus(Enum):
@@ -24,15 +53,15 @@ class ProcessingStatus(Enum):
     SKIPPED = "skipped"
 
 class VideoProcessingLogger:
-    def __init__(self, base_dir: str):
+    def __init__(self, base_dir: str, analysis_type: str):
         self.log_dir = os.path.join(base_dir, 'processing_logs')
+        self.analysis_type = analysis_type
         os.makedirs(self.log_dir, exist_ok=True)
         
-        # Create a new log file for this run with timestamp
+        # Include analysis type in log filename
         timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-        self.csv_path = os.path.join(self.log_dir, f'processing_status_{timestamp}.csv')
+        self.csv_path = os.path.join(self.log_dir, f'processing_status_{analysis_type}_{timestamp}.csv')
         
-        # Initialize new CSV file
         with open(self.csv_path, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(['video_id', 'status', 'timestamp', 'error_message'])
@@ -40,8 +69,8 @@ class VideoProcessingLogger:
         print(f"Logging to: {self.csv_path}")
     
     def get_all_logs(self) -> List[str]:
-        """Get all previous log files"""
-        return sorted(glob.glob(os.path.join(self.log_dir, 'processing_status_*.csv')))
+        """Get all previous log files for this analysis type"""
+        return sorted(glob.glob(os.path.join(self.log_dir, f'processing_status_{self.analysis_type}_*.csv')))
     
     def get_pending_videos(self, all_video_ids: List[str]) -> List[str]:
         completed_videos = set()
@@ -73,6 +102,15 @@ class VideoProcessingLogger:
                 error_message or ''
             ])
 
+class AnalysisConfig:
+    def __init__(self, metadata_type: str, force_reprocess: bool = False):
+        self.metadata_type = metadata_type
+        self.force_reprocess = force_reprocess
+        
+    @property
+    def output_suffix(self) -> str:
+        return f"tc_{self.metadata_type}"
+
 def connect_to_google_api():
     load_dotenv()
     GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
@@ -89,23 +127,27 @@ def select_video(video_basename: str):
 
 
 def await_upload(file_upload):
-    # Prepare the file to be uploaded
-    while file_upload.state == "PROCESSING":
+    attempts = 0
+    max_attempts = 5  # Add maximum attempts to prevent infinite loops
+    
+    while file_upload.state == "PROCESSING" and attempts < max_attempts:
         print('Waiting for video to be processed.')
         time.sleep(10)
         file_upload = client.files.get(name=file_upload.name)
+        attempts += 1
 
-    if file_upload.state == "FAILED":
-        raise ValueError(file_upload.state)
+    if file_upload.state == "FAILED" or attempts >= max_attempts:
+        raise ValueError(f"Upload failed or timed out: {file_upload.state}")
     print(f'Video processing complete: ' + file_upload.uri)
+    time.sleep(5)  # Add small cooldown after successful upload
 
 
-def analyze_human_presence(video_id: str, logger: VideoProcessingLogger):
+def analyze_video_content(video_id: str, logger: VideoProcessingLogger, config: AnalysisConfig):
     try:
         video_path = select_video(video_id)
-        json_output_path = f'{str(video_path.parent)}\\{video_id}_tc_humans.json'
+        json_output_path = f'{str(video_path.parent)}\\{video_id}_{config.output_suffix}.json'
         
-        if os.path.exists(json_output_path):
+        if not config.force_reprocess and os.path.exists(json_output_path):
             logger.log_status(video_id, ProcessingStatus.SKIPPED, "Output file already exists")
             return
         
@@ -114,10 +156,6 @@ def analyze_human_presence(video_id: str, logger: VideoProcessingLogger):
         connect_to_google_api()
         file_upload = client.files.upload(path=video_path)
         await_upload(file_upload)
-
-        SYSTEM_PROMPT = "When given a video and a query, call the relevant function only once with the appropriate timecodes and text for the video"
-        # prompt for checking human presence
-        USER_PROMPT = 'Generate chart data for this video based on the following instructions: for each scene, count the number of people visible. Call set_timecodes_with_numeric_values once with the list of data values and timecodes.'
 
         set_timecodes = types.FunctionDeclaration(
             name="set_timecodes",
@@ -244,7 +282,23 @@ def analyze_human_presence(video_id: str, logger: VideoProcessingLogger):
                 temperature=0,
             )
         )
-        results = response.candidates[0].content.parts[0].function_call.args
+
+        # Add error checking for response
+        if not response.candidates:
+            raise ValueError("No response candidates received from API")
+            
+        candidate = response.candidates[0]
+        if not candidate.content or not candidate.content.parts:
+            raise ValueError("No content in response candidate")
+            
+        part = candidate.content.parts[0]
+        if not hasattr(part, 'function_call'):
+            raise ValueError(f"No function call in response. Response content: {str(candidate.content)}")
+            
+        if not hasattr(part.function_call, 'args'):
+            raise ValueError(f"No args in function call. Function call content: {str(part.function_call)}")
+
+        results = part.function_call.args
 
         # Sort the list of dictionaries by the 'time' key
         sorted_timecodes = sorted(results['timecodes'], key=lambda x: datetime.datetime.strptime(x['time'], '%H:%M'))
@@ -268,15 +322,26 @@ def analyze_human_presence(video_id: str, logger: VideoProcessingLogger):
         raise e
 
 if __name__ == "__main__":
-    logger = VideoProcessingLogger('.')
+    # Configure the analysis
+    # TODO - fix force reprocess so I don't have to delete the log to do a force run.
+    config = AnalysisConfig(
+        metadata_type="graphics" if "graphics" in USER_PROMPT.lower() else "humans",
+        force_reprocess=True  # Set to True when you want to reprocess everything
+    )
+    
+    logger = VideoProcessingLogger('.', config.metadata_type)
     all_video_ids = [file.stem for file in all_mp4_files]
     pending_videos = logger.get_pending_videos(all_video_ids)
-    
-    print(f"Found {len(pending_videos)} videos pending processing")
+    pending_videos = [v for v in pending_videos if '_human_' not in v]
+
+    print(f"Found {len(pending_videos)} videos pending {config.metadata_type} analysis")
+    print(f"Force reprocess: {config.force_reprocess}")
     
     for video_id in pending_videos:
         print(f'{video_id} starting...')
         try:
-            analyze_human_presence(video_id, logger)
+            analyze_video_content(video_id, logger, config)
+            time.sleep(5)
         except Exception as e:
             print(f'Error analyzing video {video_id}: {str(e)}')
+            time.sleep(10)
