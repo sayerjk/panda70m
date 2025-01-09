@@ -35,15 +35,22 @@ from google.genai import types
 import pathlib
 from enum import Enum
 import glob
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 from prompts import *
 
 
-all_mp4_files = list(pathlib.Path('.\\panda70m_hq6m_formatted_humansOnly_v2.1').rglob('*.mp4'))
+ds_base_dir = os.path.abspath('D:\\Datasets\\Video\\Panda-70M\\dataset')
+video_dir = os.path.join(ds_base_dir, 'panda70m_hq6m_filtered_humans_v2')
+all_mp4_files = list(pathlib.Path(video_dir).rglob('*.mp4'))
+# check_list = os.listdir('D:\\Datasets\\Video\\Panda-70M\\dataset\\panda70m_hq6m_filtered_humans_v2')
 # MODEL_ID = "gemini-2.0-flash-exp"  # @param ["gemini-1.5-flash-8b","gemini-1.5-flash-002","gemini-1.5-pro-002","gemini-2.0-flash-exp"] {"allow-input":true}
 # MODEL_ID = 'gemini-1.5-pro-002' # free tier: 2 requests per minute
+# TODO - test 2.0 again; 1.5-flash has higher/better rate limits
 MODEL_ID = 'gemini-1.5-flash-002'
-USER_PROMPT = GRAPHICS_USER_PROMPT
+USER_PROMPT = GRAPHICS_USER_PROMPT_v2  # << set prompt before running >>
 
 
 class ProcessingStatus(Enum):
@@ -54,7 +61,7 @@ class ProcessingStatus(Enum):
 
 class VideoProcessingLogger:
     def __init__(self, base_dir: str, analysis_type: str):
-        self.log_dir = os.path.join(base_dir, 'processing_logs')
+        self.log_dir = os.path.join(ds_base_dir, 'processing_logs')
         self.analysis_type = analysis_type
         os.makedirs(self.log_dir, exist_ok=True)
         
@@ -128,19 +135,26 @@ def select_video(video_basename: str):
 
 def await_upload(file_upload):
     attempts = 0
-    max_attempts = 5  # Add maximum attempts to prevent infinite loops
+    max_attempts = 25  # Add maximum attempts to prevent infinite loops
     
     while file_upload.state == "PROCESSING" and attempts < max_attempts:
         print('Waiting for video to be processed.')
-        time.sleep(10)
+        time.sleep(3)
         file_upload = client.files.get(name=file_upload.name)
         attempts += 1
 
     if file_upload.state == "FAILED" or attempts >= max_attempts:
         raise ValueError(f"Upload failed or timed out: {file_upload.state}")
     print(f'Video processing complete: ' + file_upload.uri)
-    time.sleep(5)  # Add small cooldown after successful upload
+    time.sleep(1)  # Add small cooldown after successful upload
 
+
+log_lock = threading.Lock()
+
+def safe_log_status(logger, video_id, status, error_message=None):
+    """Thread-safe wrapper for logging status"""
+    with log_lock:
+        logger.log_status(video_id, status, error_message)
 
 def analyze_video_content(video_id: str, logger: VideoProcessingLogger, config: AnalysisConfig):
     try:
@@ -148,10 +162,10 @@ def analyze_video_content(video_id: str, logger: VideoProcessingLogger, config: 
         json_output_path = f'{str(video_path.parent)}\\{video_id}_{config.output_suffix}.json'
         
         if not config.force_reprocess and os.path.exists(json_output_path):
-            logger.log_status(video_id, ProcessingStatus.SKIPPED, "Output file already exists")
+            safe_log_status(logger, video_id, ProcessingStatus.SKIPPED, "Output file already exists")
             return
         
-        logger.log_status(video_id, ProcessingStatus.PENDING)
+        safe_log_status(logger, video_id, ProcessingStatus.PENDING)
         
         connect_to_google_api()
         file_upload = client.files.upload(path=video_path)
@@ -283,6 +297,8 @@ def analyze_video_content(video_id: str, logger: VideoProcessingLogger, config: 
             )
         )
 
+        time.sleep(2)
+
         # Add error checking for response
         if not response.candidates:
             raise ValueError("No response candidates received from API")
@@ -314,19 +330,21 @@ def analyze_video_content(video_id: str, logger: VideoProcessingLogger, config: 
             json.dump(results, json_file, indent=4)
 
         print(f"Video analyzer results saved to [{json_output_path}]")
-        
-        logger.log_status(video_id, ProcessingStatus.COMPLETED)
+        safe_log_status(logger, video_id, ProcessingStatus.COMPLETED)
+
+        client.files.delete(name=file_upload.name)
         
     except Exception as e:
-        logger.log_status(video_id, ProcessingStatus.FAILED, str(e))
+        safe_log_status(logger, video_id, ProcessingStatus.FAILED, str(e))
+        client.files.delete(name=file_upload.name)
         raise e
 
 if __name__ == "__main__":
     # Configure the analysis
-    # TODO - fix force reprocess so I don't have to delete the log to do a force run.
+    # TODO - fix force reprocess so I don't have to delete the log to do a force re-run.
     config = AnalysisConfig(
         metadata_type="graphics" if "graphics" in USER_PROMPT.lower() else "humans",
-        force_reprocess=True  # Set to True when you want to reprocess everything
+        force_reprocess=False  # Set to True when you want to reprocess everything
     )
     
     logger = VideoProcessingLogger('.', config.metadata_type)
@@ -337,11 +355,26 @@ if __name__ == "__main__":
     print(f"Found {len(pending_videos)} videos pending {config.metadata_type} analysis")
     print(f"Force reprocess: {config.force_reprocess}")
     
-    for video_id in pending_videos:
-        print(f'{video_id} starting...')
+    # Number of concurrent workers - adjust based on your system and API limits
+    max_workers = 12
+    
+    # Create a partial function with the fixed arguments
+    analyze_func = partial(analyze_video_content, logger=logger, config=config)
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         try:
-            analyze_video_content(video_id, logger, config)
-            time.sleep(5)
-        except Exception as e:
-            print(f'Error analyzing video {video_id}: {str(e)}')
-            time.sleep(10)
+            # Submit all videos for processing
+            futures = [executor.submit(analyze_func, video_id) for video_id in pending_videos]
+            
+            # Wait for all tasks to complete
+            for future in futures:
+                try:
+                    future.result()  # This will raise any exceptions that occurred
+                except Exception as e:
+                    print(f'Error in worker thread: {str(e)}')
+                    time.sleep(2)
+                    
+        except KeyboardInterrupt:
+            print("\nReceived interrupt, shutting down gracefully...")
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
