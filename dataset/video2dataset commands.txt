@@ -1,0 +1,28 @@
+video2dataset --url_list="D:\Datasets\Video\Panda-70M\dataset\panda70m_hq6m_formatted_humansOnly_v2.csv" \
+              --url_col="url" \
+              --caption_col="caption" \
+              --clip_col="timestamp" \
+              --output_folder="D:\Datasets\Video\Panda-70M\dataset\panda70m_hq6m_formatted_humansOnly_v2.1" \
+              --save_additional_columns="[matching_score,desirable_filtering,shot_boundary_detection]" \
+              --config="video2dataset/video2dataset/configs/panda70m.yaml"
+
+
+## Testing CSV: 20head
+
+video2dataset --url_list="D:\Datasets\Video\Panda-70M\dataset\panda70m_hq6m_filtered_humans_head20.csv" \
+              --url_col="url" \
+              --caption_col="caption" \
+              --clip_col="timestamp" \
+              --output_folder="D:\Datasets\Video\Panda-70M\dataset\panda70m_hq6m_filtered_humans_head20_v1" \
+              --save_additional_columns="[matching_score,desirable_filtering,shot_boundary_detection]" \
+              --config="video2dataset/video2dataset/configs/panda70m.yaml"
+
+## Full run: [panda70m_hq6m_filtered_humans_v2.csv]
+
+video2dataset --url_list="D:\Datasets\Video\Panda-70M\dataset\panda70m_hq6m_filtered_humans_v2.csv" \
+              --url_col="url" \
+              --caption_col="caption" \
+              --clip_col="timestamp" \
+              --output_folder="D:\Datasets\Video\Panda-70M\dataset\panda70m_hq6m_filtered_humans_v2" \
+              --save_additional_columns="[matching_score,desirable_filtering,shot_boundary_detection]" \
+              --config="video2dataset/video2dataset/configs/panda70m.yaml"
