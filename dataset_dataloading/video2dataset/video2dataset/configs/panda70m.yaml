@@ -11,6 +11,7 @@ reading:
             get_info: True
     timeout: 60
     sampler: null
+    skip_existing: True
 
 storage:
     number_sample_per_shard: 100

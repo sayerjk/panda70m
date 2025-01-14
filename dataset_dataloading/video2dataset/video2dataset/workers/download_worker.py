@@ -4,6 +4,8 @@ import math
 import time
 import pyarrow as pa
 import traceback
+import os
+from collections import defaultdict
 
 import fsspec
 
@@ -116,9 +118,11 @@ class DownloadWorker:
         shard_file, shard_id = row
         start_time = time.time()
 
+        # Load the shard data
         fs, shard_path = fsspec.core.url_to_fs(shard_file)
         with fs.open(shard_path, "rb") as f:
             df = pa.ipc.open_file(f).read_all()
+
         schema = df.schema
         schema = (
             schema.append(pa.field("key", pa.string()))
@@ -131,15 +135,17 @@ class DownloadWorker:
         del pydict
         del df
 
-        status_dict = CappedCounter()
+        # Format shard name same way writer does
+        shard_name = "{shard_id:0{oom_shard_count}d}".format(
+            shard_id=shard_id, 
+            oom_shard_count=self.config["storage"]["oom_shard_count"]
+        )
 
-        count = len(shard_to_dl)
-        successes = 0
-        failed = {
-            "failed_to_download": 0,
-            "failed_to_subsample": 0,
-        }
+        count = successes = 0
+        failed = defaultdict(int)
         bytes_downloaded = 0
+        status_dict = CappedCounter(10)
+
         url_indice = self.column_list.index("url")
         caption_indice = self.column_list.index("caption") if "caption" in self.column_list else None
         key_url_list = [(key, x[url_indice]) for key, x in shard_to_dl]
@@ -173,10 +179,24 @@ class DownloadWorker:
 
         with ThreadPool(self.config["distribution"]["thread_count"]) as thread_pool:
             for key, streams, yt_meta_dict, error_message in thread_pool.imap_unordered(
-                self.data_reader,  # pylint: disable=(unnecessary-lambda)
-                loader,
+                self.data_reader,
+                data_generator(),
             ):
                 try:
+                    # Check if file already exists
+                    if self.config["reading"].get("skip_existing", False):
+                        expected_path = os.path.join(
+                            self.output_folder,
+                            shard_name,
+                            f"{key}.{writer_encode_formats['video']}"
+                        )
+                        if os.path.exists(expected_path):
+                            print(f"Skipping {key} - file already exists")
+                            status = "already_exists"
+                            status_dict.increment(status)
+                            semaphore.release()
+                            continue
+
                     _, sample_data = shard_to_dl[key]
                     str_key = compute_key(
                         key, shard_id, oom_sample_per_shard, self.config["storage"]["oom_shard_count"]
