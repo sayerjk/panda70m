@@ -1,3 +1,25 @@
+"""
+This script filters the Panda70M dataset to identify and extract clips containing human content.
+
+The script processes the filtered CSV (created from HQ6M JSON reference) and performs:
+1. Caption analysis using predefined human-related terms
+2. Parallel processing of large datasets using ProcessPoolExecutor
+3. Preservation of all metadata (timestamps, scores, filtering flags)
+4. Statistical reporting of filtering results
+
+Input: Takes the filtered Panda70M-HQ6M CSV (panda70m_hq6m_filtered.csv)
+Output: Produces a new CSV (panda70m_hq6m_filtered_humans_v2.csv) containing only
+        clips where human presence is detected in captions.
+
+The filtering uses a comprehensive dictionary of human-related terms covering:
+- Person references (person, people, human, etc.)
+- Gender terms (man, woman, boy, girl, etc.)
+- Group terms (crowd, audience, etc.)
+- Roles (worker, student, etc.)
+- Body parts (face, hand, etc.)
+- Actions (walking, sitting, etc.)
+"""
+
 import ast
 import pandas as pd
 from pathlib import Path
