@@ -38,9 +38,14 @@ import glob
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+import subprocess
+from pathlib import Path
 
 from prompts import *
 
+# Global variables for file tracking
+active_files = set()
+active_files_lock = threading.Lock()
 
 ds_base_dir = os.path.abspath('D:\\Datasets\\Video\\Panda-70M\\dataset')
 video_dir = os.path.join(ds_base_dir, 'panda70m_hq6m_filtered_humans_v2')
@@ -51,7 +56,7 @@ all_mp4_files = list(pathlib.Path(video_dir).rglob('*.mp4'))
 # TODO - test 2.0 again; 1.5-flash has higher/better rate limits
 MODEL_ID = 'gemini-1.5-flash-002'
 USER_PROMPT = GRAPHICS_USER_PROMPT_v2  # << set prompt before running >>
-
+# USER_PROMPT = USER_PROMPT
 
 class ProcessingStatus(Enum):
     PENDING = "pending"
@@ -110,20 +115,20 @@ class VideoProcessingLogger:
             ])
 
 class AnalysisConfig:
-    def __init__(self, metadata_type: str, force_reprocess: bool = False):
+    def __init__(self, metadata_type: str, force_reprocess: bool = False, max_duration: float = 120.0):
         self.metadata_type = metadata_type
         self.force_reprocess = force_reprocess
+        self.max_duration = max_duration # time in seconds
         
     @property
     def output_suffix(self) -> str:
         return f"tc_{self.metadata_type}"
 
 def connect_to_google_api():
+    """Create a new API client instance."""
     load_dotenv()
     GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
-    global client
-    client = genai.Client(api_key=GOOGLE_API_KEY)
-    return client
+    return genai.Client(api_key=GOOGLE_API_KEY)
 
 
 def select_video(video_basename: str):
@@ -133,7 +138,8 @@ def select_video(video_basename: str):
     return video_path
 
 
-def await_upload(file_upload):
+def await_upload(file_upload, client):
+    """Wait for video upload to complete."""
     attempts = 0
     max_attempts = 25  # Add maximum attempts to prevent infinite loops
     
@@ -148,7 +154,6 @@ def await_upload(file_upload):
     print(f'Video processing complete: ' + file_upload.uri)
     time.sleep(1)  # Add small cooldown after successful upload
 
-
 log_lock = threading.Lock()
 
 def safe_log_status(logger, video_id, status, error_message=None):
@@ -156,9 +161,68 @@ def safe_log_status(logger, video_id, status, error_message=None):
     with log_lock:
         logger.log_status(video_id, status, error_message)
 
+def parse_timestamp(time_str: str) -> str:
+    """Parse and normalize timestamp to MM:SS format.
+    Raises ValueError if the timestamp is not in a valid format."""
+    # If it's already in MM:SS format, validate and return
+    if time_str.count(':') == 1:
+        minutes, seconds = map(int, time_str.split(':'))
+        if minutes < 0 or seconds < 0 or seconds >= 60:
+            raise ValueError(f"Invalid minutes/seconds values in timestamp: {time_str}")
+        return f"{minutes:02d}:{seconds:02d}"
+        
+    # If it's in HH:MM:SS format, convert to MM:SS
+    if time_str.count(':') == 2:
+        hours, minutes, seconds = map(int, time_str.split(':'))
+        total_minutes = hours * 60 + minutes
+        if total_minutes < 0 or seconds < 0 or seconds >= 60:
+            raise ValueError(f"Invalid hours/minutes/seconds values in timestamp: {time_str}")
+        return f"{total_minutes:02d}:{seconds:02d}"
+        
+    raise ValueError(f"Invalid timestamp format: {time_str}")
+
+def validate_timecode_sequence(timecodes: List[dict], video_id: str) -> None:
+    """Validate that timecodes form a proper sequence starting at 0:00."""
+    if not timecodes:
+        raise ValueError(f"Empty timecode sequence for video {video_id}")
+        
+    # Check first timecode is 0:00
+    if timecodes[0]['time'] != "00:00":
+        raise ValueError(f"First timecode must be 00:00, got {timecodes[0]['time']} for video {video_id}")
+    
+    # Check for consistent 1-second intervals
+    for i in range(1, len(timecodes)):
+        prev_min, prev_sec = map(int, timecodes[i-1]['time'].split(':'))
+        curr_min, curr_sec = map(int, timecodes[i]['time'].split(':'))
+        prev_total_secs = prev_min * 60 + prev_sec
+        curr_total_secs = curr_min * 60 + curr_sec
+        
+        if curr_total_secs - prev_total_secs != 1:
+            raise ValueError(f"Non-consecutive timecodes at index {i}: {timecodes[i-1]['time']} -> {timecodes[i]['time']} for video {video_id}")
+
+def get_video_duration(video_path: Path) -> float:
+    """Get duration of video in seconds using ffmpeg."""
+    try:
+        cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', 
+               '-of', 'default=noprint_wrappers=1:nokey=1', str(video_path)]
+        output = subprocess.check_output(cmd).decode().strip()
+        return float(output)
+    except (subprocess.CalledProcessError, ValueError) as e:
+        print(f"Error getting duration for {video_path}: {e}")
+        return 0
+
 def analyze_video_content(video_id: str, logger: VideoProcessingLogger, config: AnalysisConfig):
+    file_upload = None
+    client = None
     try:
         video_path = select_video(video_id)
+        
+        # Check video duration
+        duration = get_video_duration(video_path)
+        if duration >= config.max_duration:
+            safe_log_status(logger, video_id, ProcessingStatus.SKIPPED, f"Video duration {duration:.1f}s exceeds limit of {config.max_duration}s")
+            return
+            
         json_output_path = f'{str(video_path.parent)}\\{video_id}_{config.output_suffix}.json'
         
         if not config.force_reprocess and os.path.exists(json_output_path):
@@ -167,9 +231,15 @@ def analyze_video_content(video_id: str, logger: VideoProcessingLogger, config: 
         
         safe_log_status(logger, video_id, ProcessingStatus.PENDING)
         
-        connect_to_google_api()
+        # Create a new client for each video
+        client = connect_to_google_api()
         file_upload = client.files.upload(path=video_path)
-        await_upload(file_upload)
+        
+        # Add to active files
+        with active_files_lock:
+            active_files.add(file_upload.name)
+            
+        await_upload(file_upload, client)
 
         set_timecodes = types.FunctionDeclaration(
             name="set_timecodes",
@@ -316,64 +386,124 @@ def analyze_video_content(video_id: str, logger: VideoProcessingLogger, config: 
 
         results = part.function_call.args
 
-        # Sort the list of dictionaries by the 'time' key
-        sorted_timecodes = sorted(results['timecodes'], key=lambda x: datetime.datetime.strptime(x['time'], '%H:%M'))
+        # Validate and process timestamps before saving anything
+        try:
+            # Parse and normalize timestamps to MM:SS format
+            for timecode in results['timecodes']:
+                timecode['time'] = parse_timestamp(timecode['time'])
 
-        # Ensure 'time' key is first in each dictionary
-        sorted_timecodes = [{'time': item['time'], **{k: v for k, v in item.items() if k != 'time'}} for item in sorted_timecodes]
+            # Sort the list of dictionaries by the 'time' key
+            sorted_timecodes = sorted(results['timecodes'], 
+                                    key=lambda x: tuple(map(int, x['time'].split(':'))))
 
-        results['timecodes'] = sorted_timecodes
+            # Validate timecode sequence
+            validate_timecode_sequence(sorted_timecodes, video_id)
 
-        print(results)
+            # Ensure 'time' key is first in each dictionary
+            sorted_timecodes = [{'time': item['time'], **{k: v for k, v in item.items() if k != 'time'}} 
+                              for item in sorted_timecodes]
 
-        with open(json_output_path, 'w') as json_file:
-            json.dump(results, json_file, indent=4)
+            results['timecodes'] = sorted_timecodes
 
-        print(f"Video analyzer results saved to [{json_output_path}]")
-        safe_log_status(logger, video_id, ProcessingStatus.COMPLETED)
+            # Only save to JSON if all validation passes
+            print(f"Processing {video_id}:")  # Add video ID to output for better tracking
+            print(results)
+            with open(json_output_path, 'w') as json_file:
+                json.dump(results, json_file, indent=4)
 
-        client.files.delete(name=file_upload.name)
-        
+            print(f"Video analyzer results saved to [{json_output_path}]")
+            safe_log_status(logger, video_id, ProcessingStatus.COMPLETED)
+
+        except ValueError as e:
+            # Log the specific timestamp processing error and continue
+            error_msg = f"Failed to process timestamps in response: {str(e)}"
+            safe_log_status(logger, video_id, ProcessingStatus.FAILED, error_msg)
+            raise ValueError(error_msg)
+
     except Exception as e:
         safe_log_status(logger, video_id, ProcessingStatus.FAILED, str(e))
-        client.files.delete(name=file_upload.name)
         raise e
+    finally:
+        if file_upload and client:
+            # Remove from active files before deleting
+            with active_files_lock:
+                active_files.discard(file_upload.name)
+            try:
+                client.files.delete(name=file_upload.name)
+            except Exception as e:
+                print(f"Failed to delete file {file_upload.name}: {e}")
+
+def cleanup_uploaded_files(client):
+    """Clean up any uploaded files that aren't currently being processed."""
+    try:
+        with active_files_lock:
+            current_active = active_files.copy()
+        
+        files = client.files.list()
+        for file in files:
+            if file.name not in current_active:  # Only delete if not in use
+                try:
+                    client.files.delete(name=file.name)
+                    print(f"Cleaned up inactive file: {file.name}")
+                except Exception as e:
+                    print(f"Failed to delete file {file.name}: {e}")
+    except Exception as e:
+        print(f"Failed to list files: {e}")
 
 if __name__ == "__main__":
     # Configure the analysis
-    # TODO - fix force reprocess so I don't have to delete the log to do a force re-run.
     config = AnalysisConfig(
         metadata_type="graphics" if "graphics" in USER_PROMPT.lower() else "humans",
-        force_reprocess=False  # Set to True when you want to reprocess everything
+        force_reprocess=False
     )
+    
+    # Clean up any lingering files before starting
+    startup_client = connect_to_google_api()
+    cleanup_uploaded_files(startup_client)
+    del startup_client  # Ensure we don't keep this reference around
     
     logger = VideoProcessingLogger('.', config.metadata_type)
     all_video_ids = [file.stem for file in all_mp4_files]
     pending_videos = logger.get_pending_videos(all_video_ids)
-    pending_videos = [v for v in pending_videos if '_human_' not in v]
+    pending_videos = [v for v in pending_videos if '_filter_gemini_' not in v]
 
     print(f"Found {len(pending_videos)} videos pending {config.metadata_type} analysis")
     print(f"Force reprocess: {config.force_reprocess}")
     
     # Number of concurrent workers - adjust based on your system and API limits
-    max_workers = 12
+    max_workers = 16
+    batch_size = 50  # Process 50 videos at a time
     
     # Create a partial function with the fixed arguments
     analyze_func = partial(analyze_video_content, logger=logger, config=config)
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         try:
-            # Submit all videos for processing
-            futures = [executor.submit(analyze_func, video_id) for video_id in pending_videos]
-            
-            # Wait for all tasks to complete
-            for future in futures:
-                try:
-                    future.result()  # This will raise any exceptions that occurred
-                except Exception as e:
-                    print(f'Error in worker thread: {str(e)}')
-                    time.sleep(2)
-                    
+            # Process videos in batches
+            for i in range(0, len(pending_videos), batch_size):
+                batch = pending_videos[i:i + batch_size]
+                print(f"\nProcessing batch {i//batch_size + 1} ({len(batch)} videos)")
+                
+                # Submit current batch with rate limiting
+                futures = []
+                for video_id in batch:
+                    futures.append(executor.submit(analyze_func, video_id))
+                    # Add delay between submissions to avoid overwhelming API
+                    time.sleep(1)
+                
+                # Wait for current batch to complete before starting next batch
+                for future in futures:
+                    try:
+                        future.result()  # This will raise any exceptions that occurred
+                    except Exception as e:
+                        print(f'Error in worker thread: {str(e)}')
+                        time.sleep(2)
+                
+                # Clean up after each batch
+                cleanup_client = connect_to_google_api()
+                cleanup_uploaded_files(cleanup_client)
+                del cleanup_client
+                
         except KeyboardInterrupt:
             print("\nReceived interrupt, shutting down gracefully...")
             executor.shutdown(wait=False, cancel_futures=True)
