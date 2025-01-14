@@ -1,51 +1,90 @@
+# import json
+# import pandas as pd
+# from pathlib import Path
+#
+# def convert_json_to_csv():
+#     # Define paths
+#     json_path = Path("../dataset/Panda70M_HQ6M.json")
+#     original_csv_path = Path("../dataset/panda70m_training_full.csv")
+#     output_csv_path = Path("../dataset/panda70m_hq6m_filtered.csv")
+#
+#     # Read JSON file
+#     print("Reading JSON file...")
+#     with open(json_path, 'r', encoding='utf-8') as f:
+#         json_data = json.load(f)
+#
+#     # Extract video IDs from JSON data
+#     json_video_ids = {entry['path'].split('/')[1] for entry in json_data}
+#
+#     # Read original CSV file
+#     print("Reading original CSV file...")
+#     original_df = pd.read_csv(original_csv_path)
+#
+#     # Filter rows based on video IDs in JSON
+#     print("Filtering data...")
+#     filtered_df = original_df[original_df['videoID'].isin(json_video_ids)]
+#
+#     # Save filtered data to new CSV
+#     print(f"Saving to {output_csv_path}...")
+#     filtered_df.to_csv(output_csv_path, index=False)
+#     print("Conversion complete!")
+#
+#     # Print sample for verification
+#     print("\nSample of filtered data:")
+#     print(filtered_df.head(1).to_string())
+#
+# if __name__ == "__main__":
+#     convert_json_to_csv()
+
+
 import json
 import pandas as pd
+import dask.dataframe as dd
 from pathlib import Path
+import ast
 
 def convert_json_to_csv():
     # Define paths
-    json_path = Path("./dataset/Panda70M_HQ6M.json")
-    output_csv_path = Path("./dataset/panda70m_hq6m.csv")
-    
+    json_path = Path("../dataset/Panda70M_HQ6M.json")
+    original_csv_path = Path("../dataset/panda70m_training_full.csv")
+    output_csv_path = Path("../dataset/panda70m_hq6m_filtered.csv")
+
     # Read JSON file
     print("Reading JSON file...")
     with open(json_path, 'r', encoding='utf-8') as f:
         json_data = json.load(f)
-    
-    # Convert to DataFrame format matching CSV structure
-    print("Converting data format...")
-    formatted_data = []
-    
-    for entry in json_data:
-        # Extract video ID from path
-        video_id = entry['path'].split('/')[1]  # Gets ID from panda70m_part_XXXX/VIDEO_ID/...
-        
-        # Convert duration to timestamp format ['start', 'end']
-        duration = entry['duration']
-        timestamp = [['0:00:00.000', f'0:00:{duration:.3f}']]
-        
-        formatted_entry = {
-            'videoID': video_id,
-            'url': f"https://www.youtube.com/watch?v={video_id}",
-            'timestamp': str(timestamp),  # Convert to string to match CSV format
-            'caption': str(entry.get('cap', [])),  # Convert captions list to string
-            'matching_score': str([1.0]),  # Placeholder matching score
-            'desirable_filtering': str(['desirable']),  # Assuming all entries are desirable
-            'shot_boundary_detection': str([timestamp])  # Using same timestamp for shot boundary
-        }
-        formatted_data.append(formatted_entry)
-    
-    # Create DataFrame
-    df = pd.DataFrame(formatted_data)
-    
-    # Save to CSV
+
+    # Extract video IDs from JSON data
+    json_video_ids = {entry['path'].split('/')[1] for entry in json_data}
+
+    # Read original CSV file using Dask
+    print("Reading original CSV file...")
+    original_df = dd.read_csv(original_csv_path)
+
+    # Filter rows based on video IDs in JSON
+    print("Filtering data...")
+    filtered_df = original_df[original_df['videoID'].isin(json_video_ids)]
+
+    # Define a function to convert string representations of lists back to actual lists
+    def convert_to_list(value):
+        try:
+            return ast.literal_eval(value)
+        except (ValueError, SyntaxError):
+            return value
+
+    # Apply the conversion function to the relevant columns
+    columns_to_convert = ['caption', 'desirable_filtering', 'matching_score', 'shot_boundary_detection', 'timestamp']
+    for column in columns_to_convert:
+        filtered_df[column] = filtered_df[column].apply(convert_to_list, meta=('x', 'object'))
+
+    # Save filtered data to new CSV
     print(f"Saving to {output_csv_path}...")
-    df.to_csv(output_csv_path, index=False)
+    filtered_df.to_csv(output_csv_path, index=False, single_file=True)
     print("Conversion complete!")
-    
+
     # Print sample for verification
-    print("\nSample of converted data:")
-    print(df.head(1).to_string())
+    print("\nSample of filtered data:")
+    print(filtered_df.head(1).compute().to_string())
 
 if __name__ == "__main__":
-    convert_json_to_csv() 
+    convert_json_to_csv()
