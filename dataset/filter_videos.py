@@ -1,6 +1,6 @@
 """
-This script processes video files by extracting clips where humans are detected, using output from Google Gemini in
-video_anaylzer.py and FFmpeg for fast trimming or re-encoding
+This script processes video files by extracting clips based on multiple filtering conditions,
+using output from Google Gemini in video_analyzer.py and FFmpeg for fast trimming or re-encoding
 """
 
 import os
@@ -8,107 +8,198 @@ import json
 import glob
 import subprocess
 from datetime import timedelta
+from typing import List, Dict, Tuple, Optional, Callable
 
-def extract_human_clips(video_path, json_path, output_path=None):
+class FilterCondition:
+    def __init__(self, json_suffix: str, evaluation_func: Callable[[float], bool]):
+        """
+        Args:
+            json_suffix (str): Suffix for the JSON metadata file (e.g., '_tc_humans', '_tc_graphics')
+            evaluation_func (Callable[[float], bool]): Function that evaluates if a timecode value meets the condition
+        """
+        self.json_suffix = json_suffix
+        self.evaluation_func = evaluation_func
+
+def load_and_validate_metadata(video_path: str, filter_conditions: List[FilterCondition]) -> List[Dict]:
     """
-    Extracts subclips from a video where humans are detected, as specified in a JSON file.
-
+    Loads and validates metadata files for all filter conditions.
+    
     Args:
-        video_path (str): Path to the input video file.
-        json_path (str): Path to the JSON file with metadata about human detections.
-        output_path (str): Directory to save the output video clips. If None, uses the same directory as the input video.
+        video_path (str): Path to the video file
+        filter_conditions (List[FilterCondition]): List of filter conditions to check
+        
+    Returns:
+        List[Dict]: List of loaded metadata dictionaries
     """
-    import os
+    base_path = os.path.splitext(video_path)[0]
+    metadata_list = []
+    
+    for condition in filter_conditions:
+        json_path = f"{base_path}{condition.json_suffix}.json"
+        if not os.path.exists(json_path):
+            raise FileNotFoundError(f"Missing metadata file: {json_path}")
+            
+        with open(json_path, 'r') as f:
+            metadata_list.append(json.load(f))
+            
+    return metadata_list
 
-    if output_path is None:
-        output_path = os.path.dirname(video_path)
-
-    # Ensure the output directory exists
-    os.makedirs(output_path, exist_ok=True)
-
-    with open(json_path, 'r') as f:
-        metadata = json.load(f)
-
-    # Parse timecodes with human detections
-    timecodes = metadata["timecodes"]
-
-    # Identify segments where humans are detected
+def find_valid_segments(metadata_list: List[Dict], 
+                       filter_conditions: List[FilterCondition]) -> List[Tuple[int, int]]:
+    """
+    Identifies video segments that meet all filtering conditions.
+    
+    Args:
+        metadata_list (List[Dict]): List of metadata dictionaries
+        filter_conditions (List[FilterCondition]): List of filter conditions
+        
+    Returns:
+        List[Tuple[int, int]]: List of (start, end) time segments in seconds
+    """
+    # Initialize timeline for each condition
+    timelines = []
+    for metadata, condition in zip(metadata_list, filter_conditions):
+        timeline = {}
+        for tc in metadata["timecodes"]:
+            time_in_seconds = int(tc["time"].split(":")[1]) + int(tc["time"].split(":")[0]) * 60
+            timeline[time_in_seconds] = condition.evaluation_func(tc["value"])
+        timelines.append(timeline)
+    
+    # Find segments where all conditions are met
     segments = []
     start = None
-
-    for tc in timecodes:
-        time_in_seconds = int(tc["time"].split(":")[1]) + int(tc["time"].split(":")[0]) * 60
-        if tc["value"] > 0:
+    max_time = max(max(timeline.keys()) for timeline in timelines)
+    
+    for t in range(max_time + 1):
+        # Check if all conditions are met at this time
+        all_conditions_met = all(
+            timeline.get(t, False) for timeline in timelines
+        )
+        
+        if all_conditions_met:
             if start is None:
-                start = time_in_seconds
+                start = t
         else:
             if start is not None:
-                segments.append((start, time_in_seconds))
+                segments.append((start, t))
                 start = None
-
-    # If a segment is still open, close it at the end of the video
+                
+    # Close final segment if needed
     if start is not None:
-        video_duration = get_video_duration(video_path)
-        segments.append((start, video_duration))
+        segments.append((start, max_time))
+        
+    return segments
 
-    # Extract and save clips using FFmpeg
+def check_existing_clips(video_path: str, output_path: str, clip_suffix: str) -> bool:
+    """
+    Check if clips already exist for the given video.
+    
+    Args:
+        video_path (str): Path to the input video
+        output_path (str): Directory to check for existing clips
+        clip_suffix (str): Suffix used in output filenames
+        
+    Returns:
+        bool: True if clips exist, False otherwise
+    """
     base_name = os.path.splitext(os.path.basename(video_path))[0]
+    existing_clips = glob.glob(os.path.join(output_path, f"{base_name}_{clip_suffix}_*.mp4"))
+    return len(existing_clips) > 0
 
-    for idx, (start, end) in enumerate(segments):
+def extract_filtered_clips(video_path: str, 
+                         filter_conditions: List[FilterCondition], 
+                         output_path: Optional[str] = None,
+                         clip_suffix: str = "filter_gemini_human+graphics",
+                         overwrite: bool = False) -> None:
+    """
+    Extracts video clips that meet all specified filtering conditions.
+    
+    Args:
+        video_path (str): Path to the input video
+        filter_conditions (List[FilterCondition]): List of filter conditions
+        output_path (Optional[str]): Output directory (defaults to input video directory)
+        clip_suffix (str): Suffix to add to output clip filenames
+        overwrite (bool): If False, skip processing if clips already exist
+    """
+    if output_path is None:
+        output_path = os.path.dirname(video_path)
+    os.makedirs(output_path, exist_ok=True)
+    
+    # Check for existing clips if not overwriting
+    if not overwrite and check_existing_clips(video_path, output_path, clip_suffix):
+        print(f"Skipping {video_path} - output clips already exist")
+        return
+    
+    # Load and validate all metadata
+    metadata_list = load_and_validate_metadata(video_path, filter_conditions)
+    
+    # Find valid segments
+    segments = find_valid_segments(metadata_list, filter_conditions)
+    
+    # Extract clips
+    base_name = os.path.splitext(os.path.basename(video_path))[0]
+    
+    for idx, (start, end) in enumerate(segments, 1):
         start_time = str(timedelta(seconds=start))
         duration = end - start
-        idx_suffix = idx + 1
-        output_file = os.path.join(output_path, f"{base_name}_human_{idx_suffix:05d}.mp4")
-
-        # FFmpeg command to extract the clip
+        output_file = os.path.join(output_path, f"{base_name}_{clip_suffix}_{idx:05d}.mp4")
+        
         command = [
             "ffmpeg",
             "-ss", start_time,
             "-i", video_path,
             "-t", str(duration),
-            "-an",  # Disable audio (explicitly since input has no audio)
-            "-c:v", "copy",  # Fastest, no re-encoding
+            "-an",
+            "-c:v", "copy",
             output_file
         ]
-
-        # Print and run the FFmpeg command for debugging
+        
         print("Running command:", " ".join(command))
         subprocess.run(command, check=True)
-
+        
     print(f"Clips have been saved to {output_path}")
 
-def get_video_duration(video_path):
-    """
-    Get the duration of a video file in seconds.
-
-    Args:
-        video_path (str): Path to the video file.
-
-    Returns:
-        int: Duration of the video in seconds.
-    """
-    import ffmpeg
-    probe = ffmpeg.probe(video_path)
-    duration = float(probe['format']['duration'])
-    return int(duration)
-
 if __name__ == "__main__":
+    video_storage = 'D:\\Datasets\\Video\\Panda-70M\\dataset\\panda70m_hq6m_filtered_humans_v2'
+    
+    # Define filtering conditions
+    filter_conditions = [
+        FilterCondition(
+            json_suffix='_tc_humans',
+            evaluation_func=lambda x: x > 0  # At least one human detected
+        ),
+        FilterCondition(
+            json_suffix='_tc_graphics',
+            evaluation_func=lambda x: x == 0  # No graphics detected
+        )
+    ]
+    
 
-    video_storage = 'D:\\Datasets\\Video\\Panda-70M\\dataset\\panda70m_hq6m_formatted_humansOnly_v2.1'
-    gemini_metadata = glob.glob(f'{video_storage}\\**\\*_tc_humans.json', recursive=True)
+    
+    # Find videos that have all required metadata files
     video_paths = glob.glob(f'{video_storage}\\**\\*.mp4', recursive=True)
-
-    video_paths = [path for path in video_paths if
-                   '_clip_' not in os.path.basename(path) and
-                   os.path.exists(path.replace('.mp4', '_tc_humans.json'))]
-
+    valid_videos = []
+    
+    for video_path in video_paths:
+        if '_filter_gemini_human+graphics_' in video_path:  # Skip already processed videos
+            continue
+            
+        base_path = os.path.splitext(video_path)[0]
+        if all(os.path.exists(f"{base_path}{condition.json_suffix}.json") 
+               for condition in filter_conditions):
+            valid_videos.append(video_path)
+    
+    # Process videos
     from tqdm import tqdm
+    # Configuration
+    OVERWRITE_EXISTING = False  # Set to True to reprocess existing clips
 
-    for video_path in tqdm(video_paths, desc="Processing videos"):
-        json_path = video_path.replace('.mp4', '_tc_humans.json')
-        extract_human_clips(video_path, json_path)
-
-    # video = "D:\\Datasets\\Video\\Panda-70M\\dataset\\panda70m_hq6m_formatted_humansOnly_v2.1\\00000\\0000008_00000.mp4"
-    # metadata = "D:\\Datasets\\Video\\Panda-70M\\dataset\\panda70m_hq6m_formatted_humansOnly_v2.1\\00000\\0000008_00000_tc_humans.json"
-    #
-    # extract_human_clips(video, metadata)
+    for video_path in tqdm(valid_videos, desc="Processing videos"):
+        try:
+            extract_filtered_clips(
+                video_path, 
+                filter_conditions,
+                overwrite=OVERWRITE_EXISTING
+            )
+        except Exception as e:
+            print(f"Error processing {video_path}: {str(e)}")
