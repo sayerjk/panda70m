@@ -1,0 +1,37 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Create Upload Manifest",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/dataset/gcs/create_upload_manifest.py",
+            "args": [
+                "D:/Datasets/Video/Panda-70M/dataset/panda70m_hq6m_filtered_humans_v2",
+                "*_filter_gemini_human+graphics_*.mp4",
+                "voia-music.appspot.com",
+                "--gcs-path",
+                "_noam_dataset_videos/panda70m",
+                "--recursive"
+            ],
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Python: Upload to GCS",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/dataset/gcs/upload_to_gcs.py",
+            "args": [
+                "D:/Datasets/Video/Panda-70M/dataset/panda70m_hq6m_filtered_humans_v2",
+                "voia-music.appspot.com/_noam_dataset_videos/panda70m",
+                "--preview",
+                "--manifest",
+                "D:/Datasets/Video/Panda-70M/dataset/panda70m_hq6m_filtered_humans_v2/upload_manifest_20250115_125047.json"
+            ],
+            "console": "integratedTerminal"
+        }
+    ]
+}
